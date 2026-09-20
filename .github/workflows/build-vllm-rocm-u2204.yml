@@ -29,6 +29,9 @@ jobs:
         run: |
           apt-get update -y
           apt-get install -y build-essential cmake ninja-build git curl wget unzip ccache libnuma-dev ca-certificates gnupg sudo
+          apt-get install -y software-properties-common
+          add-apt-repository -y ppa:deadsnakes/ppa
+          apt-get update -y
           apt-get install -y python3.12 python3.12-venv python3.12-dev
           python3.12 --version
           ldd --version | head -1
