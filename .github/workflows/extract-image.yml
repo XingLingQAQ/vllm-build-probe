@@ -21,69 +21,73 @@ jobs:
           sudo apt-get clean
           df -h /
 
-      - name: Install skopeo
+      - name: Install tools
         run: |
           sudo apt-get update -y
           sudo apt-get install -y skopeo umoci jq
 
-      - name: Pull image to OCI dir
+      - name: Pull image
         run: |
           mkdir -p /tmp/img
           skopeo copy --override-os linux --override-arch amd64 \
-            docker://${{ inputs.image }} \
-            oci:/tmp/img/out:latest
-          du -sh /tmp/img
+            docker://${{ inputs.image }} oci:/tmp/img/out:latest
           df -h /
 
-      - name: Extract layers
+      - name: Unpack with umoci (rootless)
         run: |
-          mkdir -p /tmp/rootfs
-          # 用 umoci 解包 OCI 镜像
-          umoci unpack --image /tmp/img/out:latest /tmp/bundle
-          sudo ls /tmp/bundle/rootfs | head
+          set -x
+          umoci unpack --rootless --image /tmp/img/out:latest /tmp/bundle
+          R=/tmp/bundle/rootfs
+          echo "=== rootfs ==="; ls $R | head
+          echo "=== 查找 vllm ==="
+          find $R -maxdepth 9 -type d -name vllm -path "*packages*" 2>/dev/null | head
           echo "=== 查找 glm5next ==="
-          sudo find /tmp/bundle/rootfs -path "*glm5next*" -type f 2>/dev/null | head -30
-          echo
-          echo "=== vllm/models 目录 ==="
-          sudo ls /tmp/bundle/rootfs/usr/local/lib/python3*/dist-packages/vllm/models/ 2>/dev/null \
-            || sudo find /tmp/bundle/rootfs -maxdepth 8 -type d -name "models" -path "*vllm*" 2>/dev/null | head
+          find $R -path "*glm5next*" 2>/dev/null | head -30
+          echo "=== vllm/models 列表 ==="
+          V=$(find $R -maxdepth 9 -type d -name vllm -path "*packages*" | head -1)
+          ls "$V/models/" 2>/dev/null || echo "无法定位 vllm/models"
 
-      - name: Extract vllm package + wheel
+      - name: Extract vllm package
         run: |
           set -x
           R=/tmp/bundle/rootfs
-          # 找 vllm 安装位置
-          V=$(sudo find $R -maxdepth 9 -type d -name vllm -path "*dist-packages*" 2>/dev/null | head -1)
+          V=$(find $R -maxdepth 9 -type d -name vllm -path "*packages*" | head -1)
           echo "VLLM_DIR=$V"
-          sudo du -sh "$V" || true
-          sudo find $R -name "vllm*.whl" 2>/dev/null | head
-          sudo find $R -name "vllm*.dist-info" -maxdepth 9 2>/dev/null | head
-          # 打包 vllm 目录
           mkdir -p /tmp/out
-          sudo cp -a "$V" /tmp/out/ 2>/dev/null || true
-          sudo cp -a $R/usr/local/bin/vllm /tmp/out/ 2>/dev/null || true
-          sudo chown -R runner:runner /tmp/out || true
+          cp -a "$V" /tmp/out/
+          # dist-info
+          DI=$(find $R -maxdepth 9 -name "vllm-*.dist-info" -type d | head -1)
+          [ -n "$DI" ] && cp -a "$DI" /tmp/out/ || true
+          echo "=== 版本 ==="
+          cat /tmp/out/vllm-*.dist-info/METADATA 2>/dev/null | head -6 || true
+          echo "=== glm5next 文件 ==="
+          find /tmp/out -path "*glm5next*" -type f | wc -l
+          find /tmp/out -path "*glm5next*" -type f | head -25
           du -sh /tmp/out
-          # 关键信息
-          cat $R/usr/local/lib/python3*/dist-packages/vllm*/METADATA 2>/dev/null | head -5 || true
-          find /tmp/out -path "*glm5next*" -type f | head -20
 
-      - name: Package results
+      - name: List .so files
+        run: |
+          find /tmp/out -name "*.so" -exec ls -lh {} \; | head -20
+          find /tmp/out -name "*.so" | wc -l
+
+      - name: Package
         run: |
           cd /tmp/out
-          tar czf /tmp/vllm_pkg.tar.gz . 2>/dev/null || true
-          ls -lh /tmp/vllm_pkg.tar.gz
-          # 也生成内容清单
-          find /tmp/out -path "*glm5next*" > /tmp/glm5next_manifest.txt 2>/dev/null || true
+          tar czf /tmp/vllm_extracted.tar.gz . || true
+          ls -lh /tmp/vllm_extracted.tar.gz
+          find /tmp/out -path "*glm5next*" > /tmp/glm5next_manifest.txt || true
           wc -l /tmp/glm5next_manifest.txt
+          # 保存版本信息
+          cat /tmp/out/vllm-*.dist-info/METADATA 2>/dev/null | head -10 > /tmp/vllm_version.txt || true
 
-      - name: Upload artifacts
+      - name: Upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vllm-extracted
           path: |
-            /tmp/vllm_pkg.tar.gz
+            /tmp/vllm_extracted.tar.gz
             /tmp/glm5next_manifest.txt
+            /tmp/vllm_version.txt
           retention-days: 7
           compression-level: 0
