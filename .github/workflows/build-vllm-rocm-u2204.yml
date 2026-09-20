@@ -58,7 +58,13 @@ jobs:
           python3.12 -m venv /opt/venv
           echo "/opt/venv/bin" >> $GITHUB_PATH
           /opt/venv/bin/pip install --upgrade pip setuptools wheel packaging ninja "cmake>=3.26"
-          /opt/venv/bin/pip install --index-url "${{ inputs.torch_index }}" "torch==${{ inputs.torch_spec }}"
+          SPEC="${{ inputs.torch_spec }}"
+          IDX="${{ inputs.torch_index }}"
+          # 优先用完整 wheel URL（本地版本号如 +gitXXX 不能用 == 查询）
+          ENC=$(python3.12 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$SPEC")
+          WHL="${IDX}torch-${ENC}-cp312-cp312-manylinux_2_39_x86_64.whl"
+          echo "trying direct wheel: $WHL"
+          /opt/venv/bin/pip install "$WHL"             || /opt/venv/bin/pip install --index-url "$IDX" --pre "torch==${SPEC%%+*}"             || /opt/venv/bin/pip install --index-url "$IDX" torch
           /opt/venv/bin/python -c "import torch;print('FINAL torch',torch.__version__,'hip',torch.version.hip)"
 
       - name: Clone vLLM
