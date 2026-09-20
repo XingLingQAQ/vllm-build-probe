@@ -16,7 +16,6 @@ on:
 
 jobs:
   build:
-    # 关键：用 22.04 容器，GLIBC 2.35，与目标机一致
     runs-on: ubuntu-24.04
     container:
       image: ubuntu:22.04
@@ -29,14 +28,8 @@ jobs:
       - name: Prep container
         run: |
           apt-get update -y
-          apt-get install -y build-essential cmake ninja-build git curl wget \
-                             unzip ccache python3.10 python3.10-venv python3.10-dev \
-                             libnuma-dev software-properties-common ca-certificates \
-                             gnupg lsb-release sudo
-          # Python 3.12（vLLM 需要 ≥3.12）
-          add-apt-repository -y ppa:deadsnakes/ppa
-          apt-get update -y
-          apt-get install -y python3.12 python3.12-venv python3.12-dev python3.12-distutils
+          apt-get install -y build-essential cmake ninja-build git curl wget unzip ccache libnuma-dev ca-certificates gnupg sudo
+          apt-get install -y python3.12 python3.12-venv python3.12-dev
           python3.12 --version
           ldd --version | head -1
 
@@ -44,8 +37,7 @@ jobs:
         run: |
           set -x
           cd /tmp
-          URL="https://repo.radeon.com/amdgpu-install/7.2/ubuntu/jammy/amdgpu-install_7.2.70200-1_all.deb"
-          wget -O amdgpu.deb "$URL"
+          wget -O amdgpu.deb "https://repo.radeon.com/amdgpu-install/7.2/ubuntu/jammy/amdgpu-install_7.2.70200-1_all.deb"
           apt-get install -y ./amdgpu.deb
           apt-get install -y
           amdgpu-install -y --usecase=rocm --no-dkms
@@ -90,23 +82,20 @@ jobs:
           python setup.py bdist_wheel 2>&1 | tee /tmp/build.log
           ls -lh dist/
 
-      - name: Verify
+      - name: Verify GLIBC
         run: |
-          python - <<'EOF'
+          python3.12 - <<'EOF'
           import zipfile,glob,subprocess,os
           ws=glob.glob('/opt/vllm/dist/*.whl')
           print('wheel:',ws)
+          if not ws: raise SystemExit('no wheel')
           z=zipfile.ZipFile(ws[0])
           print('glm5next:',len([x for x in z.namelist() if 'glm5next' in x]))
-          # 检查 GLIBC 需求
-          d='/tmp/chk'; os.makedirs(d,exist_ok=True)
-          z.extractall(d)
-          for f in glob.glob(d+'/vllm/*.so'):
-            try:
-              out=subprocess.run(['objdump','-T',f],capture_output=True,text=True).stdout
-              vers=sorted(set(w for w in out.split() if w.startswith('GLIBC_')), key=lambda s:[int(x) for x in s[6:].split('.')])
-              print(' ',os.path.basename(f),'->',vers[-1] if vers else 'none')
-            except Exception as e: print(' ',f,e)
+          d='/tmp/chk'; os.makedirs(d,exist_ok=True); z.extractall(d)
+          for f in sorted(glob.glob(d+'/vllm/*.so')):
+            out=subprocess.run(['objdump','-T',f],capture_output=True,text=True).stdout
+            vers=sorted(set(w for w in out.split() if w.startswith('GLIBC_')), key=lambda s:[int(x) for x in s[6:].split('.')])
+            print(' ',os.path.basename(f),'->',vers[-1] if vers else 'none')
           EOF
 
       - name: Upload wheel
