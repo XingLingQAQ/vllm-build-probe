@@ -15,6 +15,14 @@ on:
         description: 'parallel compile jobs'
         required: false
         default: '4'
+      torch_spec:
+        description: 'torch version spec, e.g. 2.12.0+git6bbd260 or empty for latest'
+        required: false
+        default: ''
+      torch_index:
+        description: 'torch index url'
+        required: false
+        default: 'https://wheels.vllm.ai/rocm/torch/'
 
 jobs:
   build:
@@ -42,28 +50,38 @@ jobs:
           cd /tmp
           URL="https://repo.radeon.com/amdgpu-install/7.2/ubuntu/noble/amdgpu-install_7.2.70200-1_all.deb"
           wget -O amdgpu.deb "$URL" || curl -L -o amdgpu.deb "$URL"
-          ls -lh amdgpu.deb
           sudo dpkg -i amdgpu.deb || sudo apt-get install -y -f
           sudo apt-get install -y
           sudo amdgpu-install -y --usecase=rocm --no-dkms
           ls -d /opt/rocm*
-          /opt/rocm/bin/hipcc --version | head -2 || hipcc --version | head -2
           df -h /
 
       - name: Setup venv + torch
         run: |
+          set -x
           python3 -m venv /opt/venv
           echo "/opt/venv/bin" >> $GITHUB_PATH
-          /opt/venv/bin/pip install --upgrade pip setuptools wheel packaging ninja cmake
-          /opt/venv/bin/pip install --index-url https://wheels.vllm.ai/rocm/torch/ torch \
-            || /opt/venv/bin/pip install --index-url https://download.pytorch.org/whl/rocm7.2 torch
-          /opt/venv/bin/python -c "import torch;print('torch',torch.__version__,'hip',torch.version.hip)"
+          /opt/venv/bin/pip install --upgrade pip setuptools wheel packaging ninja "cmake>=3.26"
 
-      - name: Clone vLLM
+          SPEC="${{ inputs.torch_spec }}"
+          IDX="${{ inputs.torch_index }}"
+          if [ -n "$SPEC" ]; then
+            echo "Installing pinned torch: $SPEC"
+            /opt/venv/bin/pip install --index-url "$IDX" "torch==$SPEC" \
+              || /opt/venv/bin/pip install --index-url "$IDX" "torch==${SPEC%%+*}" \
+              || /opt/venv/bin/pip install --find-links "$IDX" "torch==$SPEC"
+          else
+            /opt/venv/bin/pip install --index-url "$IDX" torch \
+              || /opt/venv/bin/pip install --index-url https://download.pytorch.org/whl/rocm7.2 torch
+          fi
+          /opt/venv/bin/python -c "import torch;print('FINAL torch',torch.__version__,'hip',torch.version.hip)"
+
+      - name: Clone vLLM (full, for correct version string)
         run: |
-          git clone --depth 1 --branch ${{ inputs.vllm_ref }} \
-            https://github.com/vllm-project/vllm.git /opt/vllm
+          set -x
+          git clone https://github.com/vllm-project/vllm.git /opt/vllm
           cd /opt/vllm
+          git checkout ${{ inputs.vllm_ref }}
           git log --oneline -1
           echo "glm5next files: $(find vllm/models/glm5next -type f 2>/dev/null | wc -l)"
 
@@ -83,27 +101,41 @@ jobs:
           CCACHE_DIR: /home/runner/.ccache
           CMAKE_C_COMPILER_LAUNCHER: ccache
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          SETUPTOOLS_SCM_PRETEND_VERSION: "0.29.2.dev0"
         run: |
           cd /opt/vllm
           python setup.py bdist_wheel 2>&1 | tee /tmp/build.log
           echo "=== dist ==="
           ls -lh dist/ || true
-          echo "=== tail of build.log ==="
-          tail -40 /tmp/build.log
+
+      - name: Verify
+        run: |
+          set -x
+          python - <<'EOF'
+          import zipfile,glob
+          ws=glob.glob('/opt/vllm/dist/*.whl')
+          print('wheels:',ws)
+          if ws:
+            z=zipfile.ZipFile(ws[0])
+            g=[x for x in z.namelist() if 'glm5next' in x]
+            print('glm5next files:',len(g))
+            so=[x for x in z.namelist() if x.endswith('.so')]
+            print('.so:',so[:8])
+          EOF
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-log-torch${{ inputs.torch_spec }}
           path: /tmp/build.log
           retention-days: 7
 
-      - name: Upload wheel artifact
+      - name: Upload wheel
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: vllm-rocm-glm5next
+          name: vllm-rocm-glm5next-torch${{ inputs.torch_spec }}
           path: /opt/vllm/dist/*.whl
           retention-days: 7
           compression-level: 0
