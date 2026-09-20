@@ -1,0 +1,89 @@
+name: Extract vLLM from ROCm image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'image ref'
+        required: false
+        default: 'vllm/vllm-openai-rocm:nightly'
+
+jobs:
+  extract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost 2>/dev/null || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install skopeo
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y skopeo umoci jq
+
+      - name: Pull image to OCI dir
+        run: |
+          mkdir -p /tmp/img
+          skopeo copy --override-os linux --override-arch amd64 \
+            docker://${{ inputs.image }} \
+            oci:/tmp/img/out:latest
+          du -sh /tmp/img
+          df -h /
+
+      - name: Extract layers
+        run: |
+          mkdir -p /tmp/rootfs
+          # 用 umoci 解包 OCI 镜像
+          umoci unpack --image /tmp/img/out:latest /tmp/bundle
+          sudo ls /tmp/bundle/rootfs | head
+          echo "=== 查找 glm5next ==="
+          sudo find /tmp/bundle/rootfs -path "*glm5next*" -type f 2>/dev/null | head -30
+          echo
+          echo "=== vllm/models 目录 ==="
+          sudo ls /tmp/bundle/rootfs/usr/local/lib/python3*/dist-packages/vllm/models/ 2>/dev/null \
+            || sudo find /tmp/bundle/rootfs -maxdepth 8 -type d -name "models" -path "*vllm*" 2>/dev/null | head
+
+      - name: Extract vllm package + wheel
+        run: |
+          set -x
+          R=/tmp/bundle/rootfs
+          # 找 vllm 安装位置
+          V=$(sudo find $R -maxdepth 9 -type d -name vllm -path "*dist-packages*" 2>/dev/null | head -1)
+          echo "VLLM_DIR=$V"
+          sudo du -sh "$V" || true
+          sudo find $R -name "vllm*.whl" 2>/dev/null | head
+          sudo find $R -name "vllm*.dist-info" -maxdepth 9 2>/dev/null | head
+          # 打包 vllm 目录
+          mkdir -p /tmp/out
+          sudo cp -a "$V" /tmp/out/ 2>/dev/null || true
+          sudo cp -a $R/usr/local/bin/vllm /tmp/out/ 2>/dev/null || true
+          sudo chown -R runner:runner /tmp/out || true
+          du -sh /tmp/out
+          # 关键信息
+          cat $R/usr/local/lib/python3*/dist-packages/vllm*/METADATA 2>/dev/null | head -5 || true
+          find /tmp/out -path "*glm5next*" -type f | head -20
+
+      - name: Package results
+        run: |
+          cd /tmp/out
+          tar czf /tmp/vllm_pkg.tar.gz . 2>/dev/null || true
+          ls -lh /tmp/vllm_pkg.tar.gz
+          # 也生成内容清单
+          find /tmp/out -path "*glm5next*" > /tmp/glm5next_manifest.txt 2>/dev/null || true
+          wc -l /tmp/glm5next_manifest.txt
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vllm-extracted
+          path: |
+            /tmp/vllm_pkg.tar.gz
+            /tmp/glm5next_manifest.txt
+          retention-days: 7
+          compression-level: 0
