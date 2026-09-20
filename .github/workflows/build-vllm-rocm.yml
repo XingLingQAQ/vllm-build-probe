@@ -1,0 +1,110 @@
+name: Build vLLM ROCm (glm5next)
+
+on:
+  workflow_dispatch:
+    inputs:
+      vllm_ref:
+        description: 'vLLM git ref (branch/tag/commit)'
+        required: false
+        default: 'main'
+      gpu_arch:
+        description: 'ROCm GPU arch'
+        required: false
+        default: 'gfx942'
+      max_jobs:
+        description: 'parallel compile jobs'
+        required: false
+        default: '4'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                      "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential cmake ninja-build git \
+                                  curl wget unzip ccache python3.12-venv \
+                                  python3.12-dev libnuma-dev
+
+      - name: Install ROCm 7.2
+        run: |
+          cd /tmp
+          wget -q https://repo.radeon.com/amdgpu-install/7.2/ubuntu/jammy/amdgpu-install_7.2.3_amd64.deb -O amdgpu.deb \
+            || wget -q https://repo.radeon.com/amdgpu-install/7.2/ubuntu/jammy/amdgpu-install_7.2_amd64.deb -O amdgpu.deb
+          sudo dpkg -i amdgpu.deb
+          sudo apt-get install -y
+          sudo amdgpu-install -y --usecase=rocm --no-dkms
+          ls -d /opt/rocm*
+          hipcc --version | head -1
+          df -h /
+
+      - name: Setup venv + torch
+        run: |
+          python3 -m venv /opt/venv
+          echo "/opt/venv/bin" >> $GITHUB_PATH
+          /opt/venv/bin/pip install --upgrade pip setuptools wheel packaging ninja cmake
+          # ROCm torch：优先 vLLM 官方源，回退 PyTorch 官方源
+          /opt/venv/bin/pip install --index-url https://wheels.vllm.ai/rocm/torch/ torch \
+            || /opt/venv/bin/pip install --index-url https://download.pytorch.org/whl/rocm7.2 torch
+          /opt/venv/bin/python -c "import torch;print(torch.__version__, torch.version.hip)"
+
+      - name: Clone vLLM
+        run: |
+          git clone --depth 1 --branch ${{ inputs.vllm_ref }} \
+            https://github.com/vllm-project/vllm.git /opt/vllm
+          cd /opt/vllm
+          git log --oneline -1
+          echo "glm5next files: $(find vllm/models/glm5next -type f 2>/dev/null | wc -l)"
+
+      - name: Install build requirements
+        run: |
+          cd /opt/vllm
+          pip install -r requirements/build.txt || true
+          pip install setuptools_scm setuptools-rust
+
+      - name: Build wheel
+        env:
+          ROCM_PATH: /opt/rocm
+          PYTORCH_ROCM_ARCH: ${{ inputs.gpu_arch }}
+          VLLM_TARGET_DEVICE: rocm
+          MAX_JOBS: ${{ inputs.max_jobs }}
+          CMAKE_BUILD_TYPE: Release
+          CCACHE_DIR: /home/runner/.ccache
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        run: |
+          cd /opt/vllm
+          python setup.py bdist_wheel 2>&1 | tee /tmp/build.log
+          ls -lh dist/
+
+      - name: Verify glm5next in wheel
+        run: |
+          python - <<'EOF'
+          import zipfile,glob
+          w=glob.glob('/opt/vllm/dist/*.whl')[0]
+          z=zipfile.ZipFile(w)
+          g=[x for x in z.namelist() if 'glm5next' in x]
+          print('wheel:',w)
+          print('glm5next files:',len(g))
+          for x in g[:15]: print(' ',x)
+          EOF
+          ls -lh /opt/vllm/dist/
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vllm-rocm-glm5next
+          path: /opt/vllm/dist/*.whl
+          retention-days: 7
+          compression-level: 0
