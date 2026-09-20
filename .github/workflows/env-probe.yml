@@ -1,0 +1,12 @@
+name: env-probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: specs
+        run: |
+          echo "=== CPU ==="; nproc
+          echo "=== MEM ==="; free -h
+          echo "=== DISK ==="; df -h /
+          echo "=== IMAGE ==="; cat /etc/os-release | head -2
